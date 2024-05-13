@@ -328,7 +328,7 @@ from tune_gemm import gen_input
         f_kernel[fi].write(threadpool_str)
     # call all matmul_xxx functions
     idx = 0
-    runs = iters if run_bench else 200
+    runs = iters if run_bench else 1500
     for config in configs:
         configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None)
         matmul_call_str = f"""
@@ -363,7 +363,7 @@ def main():
 def extract_kernel_time(M, N, K, config, df):
     configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None)
     df = df[df['KernelName'].str.contains(configStr)]
-    meanTime = df['DurationNs'].tail(100).mean()
+    meanTime = df['DurationNs'].tail(500).mean()
     return config, meanTime
 
 
