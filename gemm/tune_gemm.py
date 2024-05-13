@@ -4,13 +4,13 @@ import sys
 import yaml
 import os
 import glob
-import subprocess
 
 import torch
 import triton
 import triton.language as tl
 
 from matmul_kernel import matmul_kernel
+from utils import run_bash_command_wrapper, run_bash_command
 
 from datetime import datetime
 import multiprocessing
@@ -127,20 +127,7 @@ def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
 def need_split_k(SIZE_M, SIZE_N, SIZE_K):
     return (SIZE_M < 64 or SIZE_N < 64) and SIZE_K > 1024
 
-def run_bash_command_wrapper(commandstring, capture=True):
-    try:
-        run_bash_command(commandstring, capture)
-    except subprocess.CalledProcessError as e:
-        if not capture:
-            print(f"running {commandstring} one more time")
-        run_bash_command(commandstring, capture)
 
-def run_bash_command(commandstring, capture=True):
-    if capture:
-        proc = subprocess.run(commandstring, shell=True, check=True, executable='/bin/bash', stdout=subprocess.PIPE)
-        return proc.stdout.splitlines()
-    proc = subprocess.run(commandstring, shell=True, check=True, executable='/bin/bash')
-    return None
 
 def read_config(config):
     bias = config.get('bias')
@@ -442,7 +429,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
         print(f"post procesing time: {post_time}", flush=True)
     return minTime, bestConfig, compile_time, profile_time, post_time
 
-def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda'):
+def gen_input(M, N, ty_name, needTrans, seed, init_type):
     d_type = name_to_tl_types[ty_name]
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -571,11 +558,6 @@ def parse_args():
         allow_abbrev=False,
     )
 
-    parser.add_argument("-m", type=int, default=0)
-    parser.add_argument("-n", type=int, default=0)
-    parser.add_argument("-k", type=int, default=0)
-    parser.add_argument("-col_a", action='store_true', default=False, help='whether matrix a is column major')
-    parser.add_argument("-col_b", action='store_true', default=False, help='whether matrix b is column major')
     parser.add_argument("-dtype_a", type=str, default='fp16', help="matrix a element data type")
     parser.add_argument("-dtype_b", type=str, default='fp16', help="matrix b element data type")
     parser.add_argument("-dtype_c", type=str, default='fp16', help="output element data type")
@@ -698,19 +680,11 @@ def main():
     mnks = []
     # TODO: make it more robust to get user input
     init_type = args.init_type
-    if matrix_size_file == "" or not os.path.isfile(matrix_size_file):
-        M = args.m
-        N = args.n
-        K = args.k
-        col_a = args.col_a
-        col_b = args.col_b
-        mnks = [(M, N, K, col_a, col_b, None)]
-    else:
-        with open(matrix_size_file) as file:
-            matrix_sizes = yaml.safe_load(file)
-        for item in matrix_sizes:
-            M, N, K, col_a, col_b, item = process_item(item)
-            mnks.append((M, N, K, col_a, col_b, item))
+    with open(matrix_size_file) as file:
+        matrix_sizes = yaml.safe_load(file)
+    for item in matrix_sizes:
+        M, N, K, col_a, col_b, item = process_item(item)
+        mnks.append((M, N, K, col_a, col_b, item))
 
     # Check correctness from given configs
     if args.compare_wo_tuning:
