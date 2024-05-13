@@ -375,9 +375,10 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
     os.environ['ROCR_VISIBLE_DEVICES'] = str(gpuid)
     jobId = gpuIdx
     while jobId < jobs:
+        kernel_name = generated_kernel_name(M, N, K, jobId)
         if verbose:
-            print(f"profiling {generated_kernel_name(M, N, K, jobId)} on GPU {gpuid}")
-        run_bash_command_wrapper(f"rocprof --stats -o results-{jobId}.csv python {generated_kernel_name(M, N, K, jobId)}", capture=(verbose < 2))
+            print(f"profiling {kernel_name} on GPU {gpuid}")
+        run_bash_command_wrapper(f"rocprof --stats -o results-{kernel_name}.csv python {kernel_name}", capture=(verbose < 2))
         jobId += ngpus
 
 
@@ -392,7 +393,8 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
     start_time = datetime.now()
     if not skipWarmup:
         for i in range(jobs):
-            run_bash_command(f"python {generated_kernel_name(M, N, K, i)} -n {num_threads}", capture=(verbose < 2))
+            kernel_name = generated_kernel_name(M, N, K, i)
+            run_bash_command(f"python {kernel_name} -n {num_threads}", capture=(verbose < 2))
     compile_end = datetime.now()
     compile_time = compile_end - start_time
     if verbose:
@@ -416,7 +418,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
     thread_pool = multiprocessing.Pool(processes=num_threads)
     tasks = []
     idx = 0
-    df_prof = [pd.read_csv(f"results-{i}.csv") for i in range(jobs)]
+    df_prof = [pd.read_csv(f"results-{generated_kernel_name(M, N, K, i)}.csv") for i in range(jobs)]
     for config in configs:
         file_idx = idx % jobs
         tasks += [thread_pool.apply_async(extract_kernel_time, args=(M, N, K, config, df_prof[file_idx]))]
@@ -582,6 +584,7 @@ def parse_args():
     parser.add_argument("--gemm_size_file", type=str, default="", help='yaml file to indicate matrix size')
     parser.add_argument("--o", type=str, default=get_default_tuning_result_filename(), help='yaml file to store tuning results')
     parser.add_argument("--keep", action='store_true', default=False, help='keep generated files')
+    parser.add_argument("--keep-prof", action='store_true', default=False, help='keep rocprof profiling csv files')
     parser.add_argument("--compare", action='store_true', default=False, help="Whether check result correctness")
     parser.add_argument("--compare_wo_tuning", action='store_true', default=False, help="Whether check result correctness")
     parser.add_argument("--benchmark", action='store_true', default=False, help="Benchmark the given config")
@@ -659,6 +662,7 @@ def main():
     matrix_size_file = args.gemm_size_file
     tuning_output_file = args.o
     keepTmp = args.keep
+    keepRocprof = args.keep_prof
     run_bench = args.benchmark
     jobs = args.jobs
     iters = args.iters
@@ -779,8 +783,9 @@ def main():
                 os.remove(generated_script)
                 if not skipWarmup:
                     os.remove(generated_script + ".failed_configs")
-                for f in glob.glob(f"results-{i}.*"):
-                    os.remove(f)
+                for f in glob.glob(f"results-{generated_script}.*"):
+                    if not f.endswith(".csv") and keepRocprof:
+                        os.remove(f)
 
         # Check correctness if asked to
         if args.compare:
