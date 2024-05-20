@@ -1,9 +1,12 @@
 import pandas as pd
 import yaml
 import re
+import argparse
 
-def extract(fname):
-    tag = "fork" if "fork" in fname else "upstream"
+from pathlib import Path
+
+
+def extract(fname, tag='triton'):
     with open(fname) as f:
         file_content = f.read()
     perfs = re.findall(
@@ -19,9 +22,26 @@ def extract(fname):
 
     return configs
 
-d1 = extract("upstream.yaml")
-df1 = pd.DataFrame(d1)
-# d2 = extract("pytorch_benchmark_fork_full.yaml")
-# df2 = pd.DataFrame(d2)
-# df = pd.concat([df1, df2])
-df1.to_csv("pytorch_20240424.csv", index=False)
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="tune a specific gemm size",
+        allow_abbrev=False,
+    )
+
+    parser.add_argument("result", type=str, help="perf result file")
+    parser.add_argument("--tag", type=str, default="triton", help="perf result file")
+    args = parser.parse_args()
+
+    return args
+
+
+def main():
+    args = parse_args()
+    fname = Path(args.result)
+    d1 = extract(fname, tag=args.tag)
+    df1 = pd.DataFrame(d1)
+    df1.to_csv(fname.stem + ".csv", index=False)
+
+if __name__ == "__main__":
+    main()
