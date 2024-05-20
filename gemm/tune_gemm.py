@@ -20,10 +20,10 @@ import pandas as pd
 def get_full_tuning_space():
     configs = []
 
-    block_mn_range = [16, 32, 64, 128, 256]
-    block_k_range = [16, 32, 64, 128, 256]
-    split_k_range = [1, 2, 4, 5, 6, 8, 10, 12, 16, 18, 24]
-    num_warps_range = [1, 2, 4, 8]
+    block_mn_range = [16]# , 32, 64, 128, 256]
+    block_k_range = [128]#[16, 32, 64, 128, 256]
+    split_k_range = [1]
+    num_warps_range = [8]#[1, 2, 4, 8]
     group_m_range = [1, 4, 8, 16, 32]
     # For now we see better perf with num_stages=0 for all gemm configs we care
     # But keep this explicit so that we do not forget we may need to set it to
@@ -328,7 +328,7 @@ from tune_gemm import gen_input
         f_kernel[fi].write(threadpool_str)
     # call all matmul_xxx functions
     idx = 0
-    runs = iters if run_bench else 1500
+    runs = iters if run_bench else 200
     for config in configs:
         configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None)
         matmul_call_str = f"""
@@ -363,7 +363,7 @@ def main():
 def extract_kernel_time(M, N, K, config, df):
     configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None)
     df = df[df['KernelName'].str.contains(configStr)]
-    meanTime = df['DurationNs'].tail(500).mean()
+    meanTime = df['DurationNs'].tail(100).mean()
     return config, meanTime
 
 
@@ -382,7 +382,7 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
         jobId += ngpus
 
 
-def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, run_bench, jobs, iters, skipWarmup, verbose=0, num_threads=16, gpus=[0]):
+def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, run_bench, jobs, iters, skipWarmup, verbose=0, num_threads=16, gpus=[0], topK=1):
     # Generate kernel out of all configs
     generate_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench)
 
@@ -414,7 +414,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
 
     # post process results.csv to get the best config and minTime
     # TODO: process the file in parallel
-    minTime = 1024 * 1024 * 1024
+    # minTime = 1024 * 1024 * 1024
     thread_pool = multiprocessing.Pool(processes=num_threads)
     tasks = []
     idx = 0
@@ -426,21 +426,36 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
     thread_pool.close()
     thread_pool.join()
 
+    prof_configs, prof_times = [], []
+    # separate config and time
     for task in tasks:
         config, myTime = task.get()
-        if myTime:
-            min_us = myTime / 1000
-            if min_us < minTime:
-                minTime = min_us
-                bestConfig = config
-        else:
-            min_us = -1
-            print(f"invalid config(post processing): SIZE {M} {N} {K}: {config}", flush=True)
+        print("myTime:", myTime)
+        prof_configs.append(config)
+        prof_times.append(myTime)
+    # wrap around torch.array to argsort
+    print("prof_times:", prof_times)
+    prof_times = torch.tensor(prof_times)
+    sorted_idx = torch.argsort(prof_times)[:topK]
+    prof_times = prof_times[sorted_idx].tolist()
+    print("prof_times:", prof_times)
+    prof_configs = [prof_configs[i] for i in sorted_idx]
+    # for task in tasks:
+    #     config, myTime = task.get()
+    #     if myTime:
+    #         min_us = myTime / 1000
+    #         if min_us < minTime:
+    #             minTime = min_us
+    #             bestConfig = config
+    #     else:
+    #         min_us = -1
+    #         print(f"invalid config(post processing): SIZE {M} {N} {K}: {config}", flush=True)
     post_end = datetime.now()
     post_time = post_end - profile_end
     if verbose:
         print(f"post procesing time: {post_time}", flush=True)
-    return minTime, bestConfig, compile_time, profile_time, post_time
+    # return minTime, bestConfig, compile_time, profile_time, post_time
+    return prof_times, prof_configs, compile_time, profile_time, post_time
 
 def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda'):
     d_type = name_to_tl_types[ty_name]
@@ -593,6 +608,7 @@ def parse_args():
     parser.add_argument("--num_threads", type=int, default=16, help="number of threads to use for kernel compilation and post processing")
     parser.add_argument("--jobs", type=int, default=1, help="number of generated files")
     parser.add_argument("--iters", type=int, default=1000, help="number of generated files")
+    parser.add_argument("--topK", type=int, default=1, help="return topK performant configs")
     parser.add_argument("--init_type", type=str, default='randn', help="Initialization type for input matrices (default uniform rand [0, 1.0)])")
     parser.add_argument("--no_warmup", action='store_true', default=False, help="Do not call the warmup kernel")
     args = parser.parse_args()
@@ -667,6 +683,7 @@ def main():
     jobs = args.jobs
     iters = args.iters
     skipWarmup = args.no_warmup
+    topK = 1 if run_bench or args.topK < 1 else int(args.topK)
 
     # Get GPU ids
     ngpus = args.ngpus
@@ -748,33 +765,51 @@ def main():
             verbose_level = 1
         if args.verbose:
             verbose_level = 2
-        minTime, bestConfig, compile_time, profile_time, post_time = tune_gemm_config(
+        minTimes, bestConfigs, compile_time, profile_time, post_time = tune_gemm_config(
                 M, N, K, col_a, col_b, dtype_a,
                 dtype_b, dtype_c, init_type, pruned_configs,
                 run_bench, jobs, iters, skipWarmup, num_threads=args.num_threads, gpus=gpus,
-                verbose=verbose_level)
+                verbose=verbose_level, topK=topK)
 
         # post processing the numbers
         perf_tflops = lambda us: 2 * M * N * K * 1e-12 / (us * 1e-6)
-        tri_tflops = perf_tflops(minTime)
-        formatted_tflops = format_output(tri_tflops)
-        minTime = format_output(minTime)
-        if not run_bench:
-            print(f'TFLOPS: {formatted_tflops} time(us): {minTime}', end=" ", flush=True)
-
-        bestConfig_compact_str, _ = gen_kernel_and_configStr_from_config(M, N, K, bestConfig, None, None, None)
-        if not run_bench:
-            print(f'best_config: {bestConfig_compact_str}', end=" ", flush=True)
-
-        # write best config to tuning_results.yaml
+        tri_tflops = list(map(perf_tflops, minTimes))
+        print(minTimes, tri_tflops)
+        formatted_tflops_list = list(map(format_output, tri_tflops))
+        print(formatted_tflops_list)
+        minTimes = list(map(format_output, minTimes))
+        print(minTimes)
         if run_bench:
-            print(f"{formatted_tflops}     {minTime}")
+            print(f"{formatted_tflops_list[0]}     {minTimes[0]}")
+        else:
+            for minTime, formatted_tflops, bestConfig in zip(minTimes, formatted_tflops_list, bestConfigs):
+                print(f'TFLOPS: {formatted_tflops} time(us): {minTime}', end=" ", flush=True)
+                bestConfig_compact_str, _ = gen_kernel_and_configStr_from_config(M, N, K, bestConfig, None, None, None)
+                print(f'best_config: {bestConfig_compact_str}', end=" ", flush=True)
+                sizeDict = {'M': M, 'N': N, 'K': K, 'rowMajorA': row_a_str, 'rowMajorB': row_b_str}
+                sizeDict.update(bestConfig)
+                f_results.write("- " + str(sizeDict) + " ")
+                f_results.write(f'# TFLOPS: {formatted_tflops} time(us): {minTime}\n')
 
-        sizeDict = {'M': M, 'N': N, 'K': K, 'rowMajorA': row_a_str, 'rowMajorB': row_b_str}
-        sizeDict.update(bestConfig)
-        if not run_bench:
-            f_results.write("- " + str(sizeDict) + " ")
-            f_results.write(f'# TFLOPS: {formatted_tflops} time(us): {minTime}\n')
+        # tri_tflops = perf_tflops(minTime)
+        # formatted_tflops = format_output(tri_tflops)
+        # minTime = format_output(minTime)
+        # if not run_bench:
+        #     print(f'TFLOPS: {formatted_tflops} time(us): {minTime}', end=" ", flush=True)
+
+        # bestConfig_compact_str, _ = gen_kernel_and_configStr_from_config(M, N, K, bestConfig, None, None, None)
+        # if not run_bench:
+        #     print(f'best_config: {bestConfig_compact_str}', end=" ", flush=True)
+
+        # # write best config to tuning_results.yaml
+        # if run_bench:
+        #     print(f"{formatted_tflops}     {minTime}")
+
+        # sizeDict = {'M': M, 'N': N, 'K': K, 'rowMajorA': row_a_str, 'rowMajorB': row_b_str}
+        # sizeDict.update(bestConfig)
+        # if not run_bench:
+        #     f_results.write("- " + str(sizeDict) + " ")
+        #     f_results.write(f'# TFLOPS: {formatted_tflops} time(us): {minTime}\n')
 
         # remove generated files if asked to
         if not keepTmp:
@@ -790,7 +825,8 @@ def main():
         # Check correctness if asked to
         if args.compare:
             print("correctness: ", end=" ", flush=True)
-            test_correctness(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, bestConfig, False)
+            for bestConfig in bestConfigs:
+                test_correctness(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, bestConfig, False)
         elif not run_bench:
             print("", flush=True)
 
