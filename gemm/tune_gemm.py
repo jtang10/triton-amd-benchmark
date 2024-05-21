@@ -819,7 +819,7 @@ def main():
                 if not skipWarmup:
                     os.remove(generated_script + ".failed_configs")
                 for f in glob.glob(f"results-{generated_script}.*"):
-                    if not f.endswith(".csv") and keepRocprof:
+                    if not f.endswith(".csv") and not keepRocprof:
                         os.remove(f)
 
         # Check correctness if asked to
