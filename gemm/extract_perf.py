@@ -19,7 +19,9 @@ def extract(fname, tag='triton'):
         config["Throughput (TFlops)"] = perf[0]
         config["time (us)"] = perf[1]
         config["Type"] = tag
-
+        config["ID"] = f"fff{config["M"]}"#-{config["N"]}-{config["K"]}"
+        # config["mnk"] = config["M"] * config["N"] * config["K"]
+        # config['config abbr'] = f"M{config["M"]}_N{config["N"]}_K{config["K"]}_BM{config["BLOCK_SIZE_M"]}_BN{config["BLOCK_SIZE_N"]}_BK{config["BLOCK_SIZE_k"]}_GM{config["GROUP_SIZE_M"]}_SK{config["SPLIT_k"]}_nW{config["num_warps"]}_nS{config["num_stages"]}_EU{config["waves_per_eu"]}_kP{config["kpack"]}_mfma{config["mfmaInstrSize"]}"
     return configs
 
 
@@ -30,7 +32,7 @@ def parse_args():
     )
 
     parser.add_argument("result", type=str, help="perf result file")
-    parser.add_argument("--tag", type=str, default="triton", help="perf result file")
+    parser.add_argument("--tag", type=str, default="triton", help="perf result file")  # noqa e501
     args = parser.parse_args()
 
     return args
@@ -42,6 +44,7 @@ def main():
     d1 = extract(fname, tag=args.tag)
     df1 = pd.DataFrame(d1)
     df1.to_csv(fname.stem + ".csv", index=False)
+
 
 if __name__ == "__main__":
     main()
