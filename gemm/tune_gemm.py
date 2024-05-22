@@ -171,6 +171,8 @@ def gen_kernel_and_configStr_from_config(M, N, K, config,
     bias, block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, \
         waves_per_eu, mfmaInstrSize, kpack = read_config(config)
     use_bias = bias is not None
+    if use_bias:
+        assert M == bias, "only row-wise bias is supported now"
     torch_dtype_a = 'fp16'
     torch_dtype_b = 'fp16'
     torch_dtype_c = 'fp16'
@@ -182,16 +184,16 @@ def gen_kernel_and_configStr_from_config(M, N, K, config,
         torch_dtype_c = tl_to_torch_types[name_to_tl_types[dtype_c]]
     configStr = f"M{M}_N{N}_K{K}_BM{block_m}_BN{block_n}_BK{block_k}_GM{group_m}_SK{split_k}_nW{num_warps}_nS{num_stages}_EU{waves_per_eu}_kP{kpack}_mfma{mfmaInstrSize}"  # noqa e501
     if bias is not None:
-        configStr += "_bias"
+        configStr += "_rowBias"
     matmul_def_str = f"""
-def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn, warmup=False, use_bias=False):  # noqa e501
+def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasm, warmup=False, use_bias=False):  # noqa e501
     grid = triton.cdiv(M, {block_m}) * triton.cdiv(N, {block_n}), {split_k}
     #print(f'config: matmul_kernel_{configStr}', flush=True)
     if warmup:
         matmul_kernel_{configStr}.warmup(
             {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_c},
             M, N, K,
-            am, ak, bk, bn, cm, cn, biasn,
+            am, ak, bk, bn, cm, cn, biasm,
             BLOCK_SIZE_M = {block_m},
             BLOCK_SIZE_N = {block_n},
             BLOCK_SIZE_K = {block_k},
@@ -211,7 +213,7 @@ def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn, wa
         matmul_kernel_{configStr}[grid](
             a, b, c, bias,
             M, N, K,
-            am, ak, bk, bn, cm, cn, biasn,
+            am, ak, bk, bn, cm, cn, biasm,
             BLOCK_SIZE_M = {block_m},
             BLOCK_SIZE_N = {block_n},
             BLOCK_SIZE_K = {block_k},
@@ -227,9 +229,9 @@ def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn, wa
         )
         return c
 
-def try_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
+def try_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasm):
     try:
-        matmul_{configStr}(None, None, None, None, M, N, K, am, ak, bk, bn, cm, cn, biasn, True, {use_bias})
+        matmul_{configStr}(None, None, None, None, M, N, K, am, ak, bk, bn, cm, cn, biasm, True, {use_bias})
         return True
     except Exception as e:
         print(f'invalid config(compilation): {configStr}: ', e, flush=True)
@@ -293,7 +295,7 @@ from tune_gemm import gen_input
     thread_pool = multiprocessing.Pool(processes=num_threads)
     a, a_fp16 = gen_input(M, K, '{dtype_a}', {col_a}, 1, '{init_type}', device='cuda')
     b, b_fp16 = gen_input(K, N, '{dtype_b}', {col_b}, 2, '{init_type}', device='cuda')
-    bias, bias_fp16 = gen_input(1, N, '{dtype_c}', False, 2, '{init_type}', device='cuda')
+    bias, bias_fp16 = gen_input(M, 1, '{dtype_c}', False, 2, '{init_type}', device='cuda')
     bias = bias.squeeze()
     bias_fp16 = bias.squeeze()
     c = torch.zeros((M, N), device=a.device, dtype={tl_to_torch_types[name_to_tl_types[dtype_c]]})
@@ -527,6 +529,7 @@ def matmul(a, b, c, bias, block_m, block_n, block_k, group_m, split_k,
     # assert b.is_contiguous(), "Matrix B must be contiguous"
     M, K = a.shape
     K, N = b.shape
+    bias_stride = bias.stride(0) if use_bias else 0
     # 1D launch kernel where each block gets its own program.
 
     grid = triton.cdiv(M, block_m) * triton.cdiv(N, block_n), split_k
@@ -537,6 +540,7 @@ def matmul(a, b, c, bias, block_m, block_n, block_k, group_m, split_k,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
+        bias_stride,
         BLOCK_SIZE_M=block_m,
         BLOCK_SIZE_N=block_n,
         BLOCK_SIZE_K=block_k,
@@ -548,6 +552,7 @@ def matmul(a, b, c, bias, block_m, block_n, block_k, group_m, split_k,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
         BIAS=use_bias,
+        EVEN_K=(K % block_k == 0),
     )
     return c
 
@@ -557,15 +562,17 @@ def test_correctness(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c,
     bias, block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, \
         waves_per_eu, mfmaInstrSize, kpack = read_config(config)
     use_bias = bias is not None
+    if use_bias:
+        assert M == bias, "only row-wise bias is supported now"
     torch.manual_seed(0)
     # a = torch.randn((M, K), device='cuda', dtype=datatype)
     # b = torch.randn((K, N), device='cuda', dtype=datatype)
     a, a_fp16 = gen_input(M, K, dtype_a, col_a, 1, init_type, device='cuda')
     b, b_fp16 = gen_input(K, N, dtype_b, col_b, 2, init_type, device='cuda')
     if use_bias:
-        bias, bias_fp16 = gen_input(1, N, dtype_b, col_b, 2, init_type, device='cuda')  # noqa e501
-        bias = bias.squeeze()
-        bias_fp16 = bias.squeeze()
+        bias, bias_fp16 = gen_input(M, 1, dtype_b, col_b, 2, init_type, device='cuda')  # noqa e501
+        # bias = bias.squeeze()
+        # bias_fp16 = bias.squeeze()
     # Allocates output.
     c = torch.zeros((M, N), device=a.device,
                     dtype=tl_to_torch_types[name_to_tl_types[dtype_c]])
@@ -574,7 +581,7 @@ def test_correctness(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c,
                            mfmaInstrSize, kpack, use_bias)
     torch_output = torch.matmul(a_fp16, b_fp16)
     if use_bias:
-        torch_output += bias_fp16[None, :]
+        torch_output += bias_fp16
     # print(f"triton_output={triton_output}")
     # print(f"torch_output={torch_output}")
     rtol = 0 if torch.version.hip is None else 1e-2
@@ -694,6 +701,7 @@ def format_output(unformatted):
     elif unformatted > 1000:
         formatted = "{:.1f}".format(unformatted)
     elif unformatted < 10:
+        formatted = "{:.4f}".format(unformatted)
     else:
         formatted = "{:.2f}".format(unformatted)
     return formatted
