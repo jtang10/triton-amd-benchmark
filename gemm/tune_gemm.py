@@ -693,6 +693,7 @@ def format_output(unformatted):
         formatted = "{:.3e}".format(unformatted)
     elif unformatted > 1000:
         formatted = "{:.1f}".format(unformatted)
+    elif unformatted < 10:
     else:
         formatted = "{:.2f}".format(unformatted)
     return formatted
