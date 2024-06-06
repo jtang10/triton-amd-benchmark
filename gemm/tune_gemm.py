@@ -375,11 +375,11 @@ def main():
         f_kernel[fi].close()
 
 
-def extract_kernel_time(M, N, K, config, df):
+def extract_kernel_time(M, N, K, config, df, iters):
     configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config,
                                                         None, None, None)
     df = df[df['KernelName'].str.contains(configStr)]
-    meanTime = df['DurationNs'].tail(100).mean()
+    meanTime = df['DurationNs'].tail(iters//2).mean()
     return config, meanTime
 
 
@@ -443,7 +443,9 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c,
     for config in configs:
         file_idx = idx % jobs
         tasks += [thread_pool.apply_async(
-            extract_kernel_time, args=(M, N, K, config, df_prof[file_idx]))]
+            extract_kernel_time,
+            args=(M, N, K, config, df_prof[file_idx], iters))
+        ]
         idx += 1
     thread_pool.close()
     thread_pool.join()
