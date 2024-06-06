@@ -779,6 +779,9 @@ def main():
         print("trans     M      N      K    TFLOPS   us")
     else:
         print(f"Tuning {len(mnks)} gemm sizes starts at: {start_time}", flush=True)  # noqa e501
+        if os.path.exists(tuning_output_file):
+            print(f"{tuning_output_file} exists already, backup to avoid overwrite") # noqa E501
+            sys.exit(1)
         f_results = open(tuning_output_file, 'w')
 
     for (M, N, K, col_a, col_b, myConfig) in mnks:
