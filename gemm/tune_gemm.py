@@ -775,8 +775,12 @@ def main():
 
     start_time = datetime.now()
     if run_bench:
+        bench_file = tuning_output_file.split(".")[0] + "_benchmark.csv"
+        print("bench_file:", bench_file)
         print(f"Benchmarking gemm with {dtype_a} inputs")
         print("trans     M      N      K    TFLOPS   us")
+        with open(bench_file, 'w') as bf:
+            bf.write("trans,M,N,K,TFLOPS,us\n")
     else:
         print(f"Tuning {len(mnks)} gemm sizes starts at: {start_time}", flush=True)  # noqa e501
         if os.path.exists(tuning_output_file):
@@ -823,6 +827,8 @@ def main():
         minTimes = list(map(format_output, minTimes))
         if run_bench:
             print(f"{formatted_tflops_list[0]}     {minTimes[0]}")
+            with open(bench_file, 'a') as f:
+                f.write(f"{row_a_str}{row_b_str}, {M}, {N},  {K}, {formatted_tflops_list[0]}, {minTimes[0]}\n")  # noqa e501
         else:
             for minTime, formatted_tflops, bestConfig in zip(minTimes, formatted_tflops_list, bestConfigs):  # noqa e501
                 print(f'TFLOPS: {formatted_tflops} time(us): {minTime}', end=" ", flush=True)  # noqa e501
